@@ -31,6 +31,26 @@
 /* =1 时使用板载按键(PB1/PB11)切页；=0 时只根据屏幕 sendme 回传同步页面 */
 #define USE_BOARD_KEY_PAGE_SWITCH 0
 
+/*
+ * ====================== 正弦波显示参数（给 s0 用） ======================
+ * 组件ID说明：
+ * 1) 组件“名字”是 s0（你在页面上看到的名称）
+ * 2) add 指令使用的是“组件ID(数字)”，不是名字
+ * 3) 如果波形不出图，优先检查 TJC_WAVE_COMP_ID 是否与你页面里的 s0 组件ID一致
+ */
+#define TJC_WAVE_COMP_ID 4
+#define TJC_WAVE_CHANNEL 0
+#define TJC_SINE_LUT_SIZE 64
+
+/* 0~255 的一个周期正弦查表（64点） */
+static const uint8_t g_SineLut[TJC_SINE_LUT_SIZE] =
+{
+	128,140,153,165,177,188,199,209,218,226,234,240,245,250,253,254,
+	255,254,253,250,245,240,234,226,218,209,199,188,177,165,153,140,
+	128,115,102,90,78,67,56,46,37,29,21,15,10,5,2,1,
+	0,1,2,5,10,15,21,29,37,46,56,67,78,90,102,115
+};
+
 /* =====================================================
  * [修改1] 页面定义 - 改成你的USART HMI里的页面号
  * =====================================================
@@ -73,6 +93,8 @@ typedef struct
 static volatile UI_Page_t g_Page = PAGE_HOME;
 static UI_Data_t g_Data = {0};
 static volatile uint8_t g_PageSyncReady = 0;
+static volatile uint8_t g_WaveNeedClear = 1;
+static uint8_t g_SineIndex = 0;
 
 /*
  * UI_OnRxByte() - 串口接收字节解析（给 USART1_IRQHandler 调用）
@@ -111,7 +133,14 @@ void UI_OnRxByte(uint8_t byte)
 				ffCount++;
 				if (ffCount >= 3)
 				{
-					g_Page = (UI_Page_t)pageId;
+					UI_Page_t newPage = (UI_Page_t)pageId;
+					g_Page = newPage;
+					if (newPage == PAGE_WAVE)
+					{
+						/* 每次进入波形页都清一次并从正弦起点开始画 */
+						g_WaveNeedClear = 1;
+						g_SineIndex = 0;
+					}
 					g_PageSyncReady = 1;
 					state = 0;
 				}
@@ -212,11 +241,32 @@ static void UI_UpdateHome(const UI_Data_t *d)
 static void UI_UpdateWave(const UI_Data_t *d)
 {
 	char cmd[32];
+	uint8_t y;
 
-	/* 构造波形指令 */
-	/* 修改3: "1"改成你USART HMI里波形控件的ID */
-	/* 修改4: 如需多个通道，可复制此行改成通道1、2... */
-	snprintf(cmd, sizeof(cmd), "add s0,0,%d", d->waveSample);
+	/*
+	 * 参数 d 在本函数里暂时不使用：
+	 * 当前波形页显示的是“代码生成的正弦波”，不是传感器波形。
+	 */
+	(void)d;
+
+	/* 切入波形页先清一次指定通道，避免残影 */
+	if (g_WaveNeedClear)
+	{
+		snprintf(cmd, sizeof(cmd), "cle %d,%d", TJC_WAVE_COMP_ID, TJC_WAVE_CHANNEL);
+		TJC_SendCommand(cmd);
+		g_WaveNeedClear = 0;
+	}
+
+	/* 从查表取当前采样点并推进索引 */
+	y = g_SineLut[g_SineIndex];
+	g_SineIndex++;
+	if (g_SineIndex >= TJC_SINE_LUT_SIZE)
+	{
+		g_SineIndex = 0;
+	}
+
+	/* 给 s0 对应组件ID的通道持续喂点，形成滚动正弦波 */
+	snprintf(cmd, sizeof(cmd), "add %d,%d,%d", TJC_WAVE_COMP_ID, TJC_WAVE_CHANNEL, y);
 	TJC_SendCommand(cmd);
 
 	/* 多通道示例（如果你要显示3条曲线）：
