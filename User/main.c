@@ -28,6 +28,9 @@
 #include "Key.h"
 #include <stdio.h>
 
+/* =1 时使用板载按键(PB1/PB11)切页；=0 时只根据屏幕 sendme 回传同步页面 */
+#define USE_BOARD_KEY_PAGE_SWITCH 0
+
 /* =====================================================
  * [修改1] 页面定义 - 改成你的USART HMI里的页面号
  * =====================================================
@@ -50,7 +53,7 @@ typedef enum
  *   frequency     - 速度（单位自定，显示在首页）
  *   rpm       - 转速（显示在首页）
  *   temp      - 温度（显示在参数页）
- *   volt      - 电压（显示在参数页）
+ *   response      - 电压（显示在参数页）
  *   waveSample - 波形数据（0~255，显示在波形页）
  *
  * 如果你需要显示其他数据（如湿度、压力等），
@@ -61,29 +64,85 @@ typedef struct
 	int32_t frequency;         /* 速度 */
 	int32_t rpm;           /* 转速 */
 	float temp;            /* 温度 */
-	float volt;            /* 电压 */
+	float response;            /* 电压 */
 	uint8_t waveSample;    /* 波形采样值 (0~255) */
 } UI_Data_t;
 
-/* 全局变量：记录当前显示的页面和业务数据 */
-static UI_Page_t g_Page = PAGE_HOME;
+/* 全局变量：记录当前显示的页面和业务数据
+   g_Page 会在中断里更新，所以要加 volatile */
+static volatile UI_Page_t g_Page = PAGE_HOME;
 static UI_Data_t g_Data = {0};
+static volatile uint8_t g_PageSyncReady = 0;
+
+/*
+ * UI_OnRxByte() - 串口接收字节解析（给 USART1_IRQHandler 调用）
+ *
+ * 目标：解析陶晶驰 sendme 返回帧：
+ *   0x66, pageId, 0xFF, 0xFF, 0xFF
+ *
+ * 上位机要做的配置（非常关键）：
+ *   在每个页面的“页面初始化事件”里写：sendme
+ *   这样每次切页，屏幕都会回传当前页号，MCU 就能同步 g_Page。
+ */
+void UI_OnRxByte(uint8_t byte)
+{
+	static uint8_t state = 0;
+	static uint8_t pageId = 0;
+	static uint8_t ffCount = 0;
+
+	switch (state)
+	{
+		case 0: /* 等帧头 0x66 */
+			if (byte == 0x66)
+			{
+				state = 1;
+			}
+			break;
+
+		case 1: /* 接收 pageId */
+			pageId = byte;
+			ffCount = 0;
+			state = 2;
+			break;
+
+		case 2: /* 等三个 0xFF 结束符 */
+			if (byte == 0xFF)
+			{
+				ffCount++;
+				if (ffCount >= 3)
+				{
+					g_Page = (UI_Page_t)pageId;
+					g_PageSyncReady = 1;
+					state = 0;
+				}
+			}
+			else
+			{
+				/* 帧异常，丢弃并重新找帧头 */
+				state = 0;
+			}
+			break;
+
+		default:
+			state = 0;
+			break;
+	}
+}
 
 /* =====================================================
  * UI_SetPage() - 页面切换函数
  * =====================================================
  * 参数：page - 要跳转的页面编号（PAGE_HOME/PAGE_WAVE/PAGE_PARAM）
  * 作用：
- *   1. 更新全局状态 g_Page（告诉主循环要刷新哪个页面）
- *   2. 发送 TJC_SetPage(page) 指令给屏幕
- *   3. 屏幕收到后会切到对应页面
+ *   1. 发送 TJC_SetPage(page) 指令给屏幕
+ *   2. g_Page 不在这里直接改，而是等待 sendme 回传后再更新
+ *      （避免“屏幕实际页”和“MCU软件页”短暂不一致）
  * 何时调用：
  *   - 用户按下"下一页"按钮时
  *   - 程序需要主动切页时
  */
 static void UI_SetPage(UI_Page_t page)
 {
-	g_Page = page;
 	TJC_SetPage((uint8_t)page);
 }
 
@@ -157,7 +216,7 @@ static void UI_UpdateWave(const UI_Data_t *d)
 	/* 构造波形指令 */
 	/* 修改3: "1"改成你USART HMI里波形控件的ID */
 	/* 修改4: 如需多个通道，可复制此行改成通道1、2... */
-	snprintf(cmd, sizeof(cmd), "add 1,0,%d", d->waveSample);
+	snprintf(cmd, sizeof(cmd), "add s0,0,%d", d->waveSample);
 	TJC_SendCommand(cmd);
 
 	/* 多通道示例（如果你要显示3条曲线）：
@@ -195,14 +254,13 @@ static void UI_UpdateParam(const UI_Data_t *d)
 {
 	char text[32];
 
-	/* 格式化温度文本 */
-	snprintf(text, sizeof(text), "T=%.1fC", d->temp);
-	/* 修改5: "t1"改成你USART HMI里参数页的温度文本组件名 */
-	TJC_SetText("t1", text);
-
 	/* 设置电压数值（浮点） */
 	/* 修改6: "n1"改成你USART HMI里参数页的电压数字组件名 */
-	TJC_SetFloat("n1", d->volt);
+	TJC_SetFloat("n0", d->frequency);
+	TJC_SetFloat("n1", d->response);
+	TJC_SetText("t0", "频率");
+    TJC_SetText("t1", "电压");
+    
 
 	/* 如果你还有其他参数要显示（如湿度、压力、时间等），继续添加：
 	   例如：
@@ -254,7 +312,7 @@ static void UI_Process(const UI_Data_t *d)
  *       d->frequency = ADC_GetChannelValue(0);        // 从ADC通道0读速度
  *       d->rpm = Motor_GetRPM();                  // 从电机模块读转速
  *       d->temp = TempSensor_Read();              // 从温度传感器读
- *       d->volt = ADC_GetChannelValue(1);         // 从ADC通道1读电压
+ *       d->response = ADC_GetChannelValue(1);         // 从ADC通道1读电压
  *       d->waveSample = get_waveform_sample();    // 从某个缓冲读波形数据
  *   }
  *
@@ -269,7 +327,7 @@ static void Data_Simulate(UI_Data_t *d)
 	d->frequency = (cnt % 200);                            /* 速度在0~199之间循环 */
 	d->rpm = 1200 + (cnt % 800);                       /* 转速在1200~2000之间循环 */
 	d->temp = 25.0f + (float)(cnt % 100) * 0.1f;      /* 温度在25~35℃之间循环 */
-	d->volt = 12.0f + (float)(cnt % 30) * 0.01f;      /* 电压在12~12.3V之间循环 */
+	d->response = 12.0f + (float)(cnt % 30) * 0.01f;      /* 电压在12~12.3V之间循环 */
 	d->waveSample = (uint8_t)(cnt % 256);             /* 波形采样在0~255之间循环 */
 }
 
@@ -288,11 +346,15 @@ static void Data_Simulate(UI_Data_t *d)
  */
 int main(void)
 {
+#if USE_BOARD_KEY_PAGE_SWITCH
 	uint8_t keyNum;
+#endif
 
 	/* 第1步：硬件初始化 */
 	OLED_Init();                       /* 初始化OLED小屏（调试显示用） */
+#if USE_BOARD_KEY_PAGE_SWITCH
 	Key_Init();                        /* 初始化板载按键（PB1/PB11） */
+#endif
 	Serial_Init(9600);                 /* 初始化USART1，波特率9600（必须和屏幕一致） */
 
 	/* 显示启动信息 */
@@ -301,6 +363,7 @@ int main(void)
 
 	/* 第2步：初始化UI状态 */
 	UI_SetPage(PAGE_HOME);             /* 切到首页 */
+	TJC_SendCommand("sendme");         /* 主动请求一次当前页，校准 g_Page */
 
 	/* =====================================================
 	 * 第3步：主循环（forever）
@@ -318,6 +381,7 @@ int main(void)
 	 */
 	while (1)
 	{
+#if USE_BOARD_KEY_PAGE_SWITCH
 		/* 读取按键，实现页面切换 */
 		keyNum = Key_GetNum();
 		if (keyNum == 1)               /* KEY1: 下一页 */
@@ -330,6 +394,7 @@ int main(void)
 		{
 			UI_SetPage(PAGE_HOME);
 		}
+#endif
 
 		/* 采集业务数据（当前用模拟，实际项目改成真实采样） */
 		Data_Simulate(&g_Data);
@@ -339,6 +404,11 @@ int main(void)
 
 		/* 显示当前页号在OLED上（调试用） */
 		OLED_ShowNum(2, 1, (uint32_t)g_Page, 1);
+		if (g_PageSyncReady)
+		{
+			OLED_ShowString(3, 1, "Page Sync OK ");
+			g_PageSyncReady = 0;
+		}
 
 		/* 延时100ms再处理下一次 */
 		Delay_ms(100);
