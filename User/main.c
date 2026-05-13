@@ -36,6 +36,9 @@
 /* =1 时生成模拟扫频数据，测试表格显示；=0 时等待真实 FPGA 数据 */
 #define FPGA_TEST_MODE 1
 
+/* 陶晶驰屏上放“上一页/下一页”按钮的实际页面号（从串口回传 p=3 看出来） */
+#define TJC_TABLE_TOUCH_PAGE 3
+
 /*
  * ====================== 正弦波显示参数（给 s0 用） ======================
  * 组件ID说明：
@@ -100,6 +103,11 @@ static UI_Data_t g_Data = {0};
 static volatile uint8_t g_PageSyncReady = 0;
 static volatile uint8_t g_WaveNeedClear = 1;
 static uint8_t g_SineIndex = 0;
+/* touch debug: store last touch frame from screen for diagnostics (set in ISR) */
+static volatile uint8_t g_LastTouchPage = 0;
+static volatile uint8_t g_LastTouchComp = 0;
+static volatile uint8_t g_LastTouchEvent = 0;
+static volatile uint8_t g_TouchReady = 0;
 /*
  * UI_OnRxByte() - 串口接收字节解析（给 USART1_IRQHandler 调用）
  *
@@ -158,8 +166,14 @@ void UI_OnRxByte(uint8_t byte)
 			uint8_t compId  = buf[2];
 			uint8_t eventId = buf[3];
 
-			/* 只响应松开事件，且仅在 PAGE_PARAM 页 */
-			if (eventId == 0x00 && pageId == PAGE_PARAM)
+			/* store last touch frame for main-loop debug display (ISR-safe small writes) */
+			g_LastTouchPage = pageId;
+			g_LastTouchComp = compId;
+			g_LastTouchEvent = eventId;
+			g_TouchReady = 1;
+
+			/* 只响应按下或松开事件，且仅在表格按钮所在的实际页面上 */
+			if ((eventId == 0x00 || eventId == 0x01) && pageId == TJC_TABLE_TOUCH_PAGE)
 			{
 				switch (compId)
 				{
@@ -327,9 +341,9 @@ static void UI_UpdateTable(void)
 	end     = start + FPGA_TABLE_ROWS_PER_PAGE;
 	if (end > total) end = total;
 
-	/* header */
-	TJC_Table_FormatCell(col1, "Freq(Hz)", 12);
-	TJC_Table_FormatCell(col2, "Amp(mV)", 10);
+	/* header：收紧宽度，避免单行过长导致屏幕自动换行 */
+	TJC_Table_FormatCell(col1, "Freq", 8);
+	TJC_Table_FormatCell(col2, "Amp", 8);
 	len = snprintf(table, sizeof(table), "%s%s\r\n", col1, col2);
 
 	/* data rows (max 4, short command) */
@@ -338,8 +352,8 @@ static void UI_UpdateTable(void)
 		uint32_t freq;
 		uint16_t amp;
 		FPGA_GetPoint(i, &freq, &amp);
-		TJC_Table_FormatNum(col1, (int32_t)freq, 12);
-		TJC_Table_FormatNum(col2, (int32_t)amp,  10);
+		TJC_Table_FormatNum(col1, (int32_t)freq, 8);
+		TJC_Table_FormatNum(col2, (int32_t)amp,  8);
 		len += snprintf(table + len, sizeof(table) - len,
 		                "%s%s\r\n", col1, col2);
 	}
@@ -543,6 +557,14 @@ int main(void)
 			         (int)FPGA_TableGetCurrentPage(),
 			         (int)FPGA_TableGetTotalPages());
 			OLED_ShowString(4, 1, dbg);
+
+			/* 如果有触摸回传，显示最后一次触摸的 page/comp/event（用于诊断） */
+			if (g_TouchReady)
+			{
+				/* 不覆盖屏幕上用于显示页码的 t1，直接通过串口输出调试信息 */
+				Serial_Printf("T: p=%d c=%d e=%d\r\n", (int)g_LastTouchPage, (int)g_LastTouchComp, (int)g_LastTouchEvent);
+				g_TouchReady = 0;
+			}
 		}
 
 		/* 延时100ms再处理下一次 */
