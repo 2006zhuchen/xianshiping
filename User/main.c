@@ -26,10 +26,15 @@
 #include "OLED.h"
 #include "Seruak.h"
 #include "Key.h"
+#include "Fpga.h"
 #include <stdio.h>
+#include <string.h>
 
 /* =1 时使用板载按键(PB1/PB11)切页；=0 时只根据屏幕 sendme 回传同步页面 */
 #define USE_BOARD_KEY_PAGE_SWITCH 0
+
+/* =1 时生成模拟扫频数据，测试表格显示；=0 时等待真实 FPGA 数据 */
+#define FPGA_TEST_MODE 1
 
 /*
  * ====================== 正弦波显示参数（给 s0 用） ======================
@@ -95,7 +100,6 @@ static UI_Data_t g_Data = {0};
 static volatile uint8_t g_PageSyncReady = 0;
 static volatile uint8_t g_WaveNeedClear = 1;
 static uint8_t g_SineIndex = 0;
-
 /*
  * UI_OnRxByte() - 串口接收字节解析（给 USART1_IRQHandler 调用）
  *
@@ -106,55 +110,72 @@ static uint8_t g_SineIndex = 0;
  *   在每个页面的“页面初始化事件”里写：sendme
  *   这样每次切页，屏幕都会回传当前页号，MCU 就能同步 g_Page。
  */
+#define RX_BUF_SIZE 16
+
 void UI_OnRxByte(uint8_t byte)
 {
-	static uint8_t state = 0;
-	static uint8_t pageId = 0;
-	static uint8_t ffCount = 0;
+	static uint8_t buf[RX_BUF_SIZE];
+	static uint8_t len = 0;
+	static uint8_t ffCnt = 0;
 
-	switch (state)
+	/* 缓冲区溢出保护 */
+	if (len >= RX_BUF_SIZE)
 	{
-		case 0: /* 等帧头 0x66 */
-			if (byte == 0x66)
+		len = 0;
+		ffCnt = 0;
+		return;
+	}
+
+	buf[len++] = byte;
+
+	/* 计数连续 0xFF */
+	if (byte == 0xFF)
+		ffCnt++;
+	else
+		ffCnt = 0;
+
+	/* 收到帧尾（3 个连续 0xFF） */
+	if (ffCnt >= 3 && len >= 3)
+	{
+		uint8_t dataLen = len - 3;  /* 去掉尾部 3 个 0xFF */
+
+		if (dataLen >= 2 && buf[0] == 0x66)
+		{
+			/* 0x66 页面同步帧：66 pageId */
+			UI_Page_t newPage = (UI_Page_t)buf[1];
+			g_Page = newPage;
+			if (newPage == PAGE_WAVE)
 			{
-				state = 1;
+				g_WaveNeedClear = 1;
+				g_SineIndex = 0;
 			}
-			break;
+			g_PageSyncReady = 1;
+		}
+		else if (dataLen >= 4 && buf[0] == 0x65)
+		{
+			/* 0x65 触摸事件帧：65 pageId compId event */
+			uint8_t pageId  = buf[1];
+			uint8_t compId  = buf[2];
+			uint8_t eventId = buf[3];
 
-		case 1: /* 接收 pageId */
-			pageId = byte;
-			ffCount = 0;
-			state = 2;
-			break;
-
-		case 2: /* 等三个 0xFF 结束符 */
-			if (byte == 0xFF)
+			/* 只响应松开事件，且仅在 PAGE_PARAM 页 */
+			if (eventId == 0x00 && pageId == PAGE_PARAM)
 			{
-				ffCount++;
-				if (ffCount >= 3)
+				switch (compId)
 				{
-					UI_Page_t newPage = (UI_Page_t)pageId;
-					g_Page = newPage;
-					if (newPage == PAGE_WAVE)
-					{
-						/* 每次进入波形页都清一次并从正弦起点开始画 */
-						g_WaveNeedClear = 1;
-						g_SineIndex = 0;
-					}
-					g_PageSyncReady = 1;
-					state = 0;
+					case 8: FPGA_SetWave(FPGA_WAVE_SINE);   break;
+					case 6: FPGA_SetWave(FPGA_WAVE_TRI);    break;
+					case 7: FPGA_SetWave(FPGA_WAVE_SQUARE); break;
+					case 9:  FPGA_TableNextPage(); break;
+					case 10: FPGA_TablePrevPage(); break;
+					default: break;
 				}
 			}
-			else
-			{
-				/* 帧异常，丢弃并重新找帧头 */
-				state = 0;
-			}
-			break;
+		}
 
-		default:
-			state = 0;
-			break;
+		/* 重置缓冲区，等下一帧 */
+		len = 0;
+		ffCnt = 0;
 	}
 }
 
@@ -279,6 +300,58 @@ static void UI_UpdateWave(const UI_Data_t *d)
 }
 
 /* =====================================================
+ * UI_UpdateTable() - 表格刷新函数
+ * =====================================================
+ * 从 FPGA 数据数组中取当前页的行，拼成表格字符串发给屏幕。
+ * 调用时机：翻页按钮按下（g_TableDirty == 1）时由 UI_UpdateParam 调用。
+ * 屏幕组件：需在 page2 放一个大文本框（t0），字体选等宽。
+ */
+static void UI_UpdateTable(void)
+{
+	char table[256];
+	char col1[16], col2[16];
+	char info[16];
+	uint16_t i, start, end, total, curPage;
+	int len;
+
+	if (!FPGA_TableHasData())
+	{
+		TJC_SetText("t0", "NoData");
+		TJC_SetText("t1", "");
+		return;
+	}
+
+	total   = FPGA_GetPointCount();
+	curPage = FPGA_TableGetCurrentPage();
+	start   = (curPage - 1) * FPGA_TABLE_ROWS_PER_PAGE;
+	end     = start + FPGA_TABLE_ROWS_PER_PAGE;
+	if (end > total) end = total;
+
+	/* header */
+	TJC_Table_FormatCell(col1, "Freq(Hz)", 12);
+	TJC_Table_FormatCell(col2, "Amp(mV)", 10);
+	len = snprintf(table, sizeof(table), "%s%s\r\n", col1, col2);
+
+	/* data rows (max 4, short command) */
+	for (i = start; i < end; i++)
+	{
+		uint32_t freq;
+		uint16_t amp;
+		FPGA_GetPoint(i, &freq, &amp);
+		TJC_Table_FormatNum(col1, (int32_t)freq, 12);
+		TJC_Table_FormatNum(col2, (int32_t)amp,  10);
+		len += snprintf(table + len, sizeof(table) - len,
+		                "%s%s\r\n", col1, col2);
+	}
+
+	TJC_SetText("t0", table);
+
+	snprintf(info, sizeof(info), "Pg %d/%d", (int)curPage, (int)FPGA_TableGetTotalPages());
+	TJC_SetText("t1", info);
+}
+
+
+/* =====================================================
  * UI_UpdateParam() - 参数页刷新函数
  * =====================================================
  * 参数：d - 指向 UI_Data_t 的指针，包含最新的业务数据
@@ -302,15 +375,12 @@ static void UI_UpdateWave(const UI_Data_t *d)
  */
 static void UI_UpdateParam(const UI_Data_t *d)
 {
-	char text[32];
+	UI_UpdateTable();
 
 	/* 设置电压数值（浮点） */
 	/* 修改6: "n1"改成你USART HMI里参数页的电压数字组件名 */
 	TJC_SetFloat("n0", d->frequency);
 	TJC_SetFloat("n1", d->response);
-	TJC_SetText("t0", "频率");
-    TJC_SetText("t1", "电压");
-    
 
 	/* 如果你还有其他参数要显示（如湿度、压力、时间等），继续添加：
 	   例如：
@@ -406,10 +476,15 @@ int main(void)
 	Key_Init();                        /* 初始化板载按键（PB1/PB11） */
 #endif
 	Serial_Init(9600);                 /* 初始化USART1，波特率9600（必须和屏幕一致） */
+	FPGA_Init();                       /* 初始化FPGA波形选择引脚（PB5/PB6/PB7） */
+	FPGA_InitRX();                     /* 初始化USART2，接收FPGA扫频数据 */
+#if FPGA_TEST_MODE
+	FPGA_GenerateTestData();           /* generate test sweep data for table */
+#endif
 
 	/* 显示启动信息 */
 	OLED_ShowString(1, 1, "TJC UI FRAME");
-	Delay_ms(3000);                    /* 必须等待屏幕启动完毕 */
+	Delay_ms(3000);                    /* wait for screen boot */
 
 	/* 第2步：初始化UI状态 */
 	UI_SetPage(PAGE_HOME);             /* 切到首页 */
@@ -458,6 +533,16 @@ int main(void)
 		{
 			OLED_ShowString(3, 1, "Page Sync OK ");
 			g_PageSyncReady = 0;
+		}
+		{
+			/* FPGA 数据调试：第3行显数据条数，第4行显当前页 */
+			char dbg[16];
+			snprintf(dbg, sizeof(dbg), "D:%-5d", (int)FPGA_GetPointCount());
+			OLED_ShowString(3, 1, dbg);
+			snprintf(dbg, sizeof(dbg), "Pg:%-3d/%-3d",
+			         (int)FPGA_TableGetCurrentPage(),
+			         (int)FPGA_TableGetTotalPages());
+			OLED_ShowString(4, 1, dbg);
 		}
 
 		/* 延时100ms再处理下一次 */
