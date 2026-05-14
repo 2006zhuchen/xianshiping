@@ -43,6 +43,7 @@ void FPGA_SetWave(FPGA_WaveType wave);
 
 #define FPGA_TABLE_ROWS_PER_PAGE  4
 #define FPGA_MAX_POINTS           2000
+#define FPGA_HARM_MAX_POINTS      200
 
 void     FPGA_InitRX(void);
 void     FPGA_OnRxByte(uint8_t byte);
@@ -58,5 +59,18 @@ uint8_t  FPGA_TableHasData(void);
 
 /* ========== 测试用：生成模拟扫频数据 ========== */
 void     FPGA_GenerateTestData(void);
+
+/* ========== 谐波数据（pagewave 表格用） ========== */
+
+void     FPGA_GenerateHarmTestData(void);
+
+uint16_t FPGA_HarmGetPointCount(void);
+uint8_t  FPGA_HarmGetPoint(uint16_t index, uint32_t *freq, uint16_t *amp);
+
+void     FPGA_HarmTableNextPage(void);
+void     FPGA_HarmTablePrevPage(void);
+uint16_t FPGA_HarmTableGetCurrentPage(void);
+uint16_t FPGA_HarmTableGetTotalPages(void);
+uint8_t  FPGA_HarmTableHasData(void);
 
 #endif

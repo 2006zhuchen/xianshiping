@@ -334,7 +334,7 @@
             <v6Rtti>0</v6Rtti>
             <VariousControls>
               <MiscControls></MiscControls>
-              <Define>USE_STDPERIPH_DRIVER</Define>
+              <Define>USE_STDPERIPH_DRIVER, STM32F10X_MD</Define>
               <Undefine></Undefine>
               <IncludePath>.\Start;.\Library;.\User;.\System;.\Hardware</IncludePath>
             </VariousControls>
@@ -709,6 +709,16 @@
               <FileName>Seruak.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\Hardware\Seruak.h</FilePath>
+            </File>
+            <File>
+              <FileName>Fpga.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Hardware\Fpga.c</FilePath>
+            </File>
+            <File>
+              <FileName>Fpga.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\Hardware\Fpga.h</FilePath>
             </File>
           </Files>
         </Group>

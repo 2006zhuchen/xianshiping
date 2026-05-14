@@ -51,6 +51,12 @@ static uint16_t g_AmpData [FPGA_MAX_POINTS];
 static volatile uint16_t g_PointCount = 0;
 static uint16_t g_TablePage = 0;
 
+/* 谐波数据（pagewave 独立使用） */
+static uint32_t g_HarmFreq[FPGA_HARM_MAX_POINTS];
+static uint16_t g_HarmAmp [FPGA_HARM_MAX_POINTS];
+static uint16_t g_HarmCount = 0;
+static uint16_t g_HarmPage = 0;
+
 /* 简单字符串转整数（不依赖 stdlib） */
 static uint32_t FPGA_AToI(const char *s)
 {
@@ -219,4 +225,67 @@ uint16_t FPGA_TableGetTotalPages(void)
 uint8_t FPGA_TableHasData(void)
 {
     return (g_PointCount > 0) ? 1 : 0;
+}
+
+/* ==================================================================
+ *  第五部分：谐波数据（pagewave 表格独立使用）
+ *
+ *  基频 50Hz，2~8次谐波幅值递减。
+ * ================================================================== */
+
+void FPGA_GenerateHarmTestData(void)
+{
+    uint16_t i;
+    /* 基频 50Hz，幅值 5000；2次谐波 100Hz 幅值 2500；以此类推 */
+    for (i = 0; i < 8 && i < FPGA_HARM_MAX_POINTS; i++)
+    {
+        uint16_t n = i + 1;
+        g_HarmFreq[i] = 50u * n;
+        g_HarmAmp[i]  = 5000u / n;
+    }
+    g_HarmCount = i;
+    g_HarmPage = 0;
+}
+
+uint16_t FPGA_HarmGetPointCount(void)
+{
+    return g_HarmCount;
+}
+
+uint8_t FPGA_HarmGetPoint(uint16_t index, uint32_t *freq, uint16_t *amp)
+{
+    if (index >= g_HarmCount) return 0;
+    *freq = g_HarmFreq[index];
+    *amp  = g_HarmAmp [index];
+    return 1;
+}
+
+void FPGA_HarmTableNextPage(void)
+{
+    uint16_t total = FPGA_HarmTableGetTotalPages();
+    if (total == 0) return;
+    if (g_HarmPage + 1 < total)
+        g_HarmPage++;
+}
+
+void FPGA_HarmTablePrevPage(void)
+{
+    if (g_HarmPage > 0)
+        g_HarmPage--;
+}
+
+uint16_t FPGA_HarmTableGetCurrentPage(void)
+{
+    return g_HarmPage + 1;
+}
+
+uint16_t FPGA_HarmTableGetTotalPages(void)
+{
+    if (g_HarmCount == 0) return 0;
+    return (g_HarmCount + FPGA_TABLE_ROWS_PER_PAGE - 1) / FPGA_TABLE_ROWS_PER_PAGE;
+}
+
+uint8_t FPGA_HarmTableHasData(void)
+{
+    return (g_HarmCount > 0) ? 1 : 0;
 }

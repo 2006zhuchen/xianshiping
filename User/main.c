@@ -39,6 +39,10 @@
 /* 陶晶驰屏上放“上一页/下一页”按钮的实际页面号（从串口回传 p=3 看出来） */
 #define TJC_TABLE_TOUCH_PAGE 3
 
+/* pagewave 谐波表翻页按钮的组件 ID */
+#define TJC_WAVE_BTN_NEXT_ID  5   /* b2: 下一页 */
+#define TJC_WAVE_BTN_PREV_ID  4   /* b1: 上一页 */
+
 /*
  * ====================== 正弦波显示参数（给 s0 用） ======================
  * 组件ID说明：
@@ -184,6 +188,16 @@ void UI_OnRxByte(uint8_t byte)
 					case 10: FPGA_TablePrevPage(); break;
 					default: break;
 				}
+
+			}
+
+			/* pagewave 谐波表翻页: b1=下一页, b2=上一页 */
+			if (pageId == PAGE_WAVE)
+			{
+				if (compId == TJC_WAVE_BTN_NEXT_ID)
+					FPGA_HarmTableNextPage();
+				else if (compId == TJC_WAVE_BTN_PREV_ID)
+					FPGA_HarmTablePrevPage();
 			}
 		}
 
@@ -266,7 +280,11 @@ static void UI_UpdateHome(const UI_Data_t *d)
  *   - 波形ID: 你在USART HMI里为波形组件设置的ID（通常0~n）
  *   - 通道: 0/1/2/3 等（一个波形可显示多条曲线）
  *   - 数值: 0~255（对应波形的垂直显示范围）
- *
+ */
+
+static void UI_UpdateWaveTable(void);
+
+/*
  * 你需要改的地方：
  *   - "1"改成你的波形组件ID
  *     例如你在USART HMI里波形控件ID是2，就改成 add 2,0,%d
@@ -304,13 +322,8 @@ static void UI_UpdateWave(const UI_Data_t *d)
 	snprintf(cmd, sizeof(cmd), "add %d,%d,%d", TJC_WAVE_COMP_ID, TJC_WAVE_CHANNEL, y);
 	TJC_SendCommand(cmd);
 
-	/* 多通道示例（如果你要显示3条曲线）：
-	   char cmd2[32], cmd3[32];
-	   snprintf(cmd2, sizeof(cmd2), "add 1,1,%d", d->waveSample2);
-	   snprintf(cmd3, sizeof(cmd3), "add 1,2,%d", d->waveSample3);
-	   TJC_SendCommand(cmd2);
-	   TJC_SendCommand(cmd3);
-	*/
+	/* 刷新谐波表格到 t0 */
+	UI_UpdateWaveTable();
 }
 
 /* =====================================================
@@ -364,6 +377,60 @@ static void UI_UpdateTable(void)
 	TJC_SetText("t1", info);
 }
 
+
+/* =====================================================
+ * UI_UpdateWaveTable() - pagewave 谐波表格刷新函数
+ * =====================================================
+ * 拼 3 列谐波表：谐波次数 | 频率 | 幅度
+ * 每页 4 行，发到 pagewave 的 t0。
+ * b1 / b2 按钮翻页，弹起事件写：
+ *   b1: printh 65 01 04 00 FF FF FF
+ *   b2: printh 65 01 05 00 FF FF FF
+ */
+static void UI_UpdateWaveTable(void)
+{
+	char table[256];
+	char col1[12], col2[12], col3[12];
+	char info[16];
+	uint16_t i, start, end, total, curPage;
+	int len;
+
+	if (!FPGA_HarmTableHasData())
+	{
+		TJC_SetText("t0", "NoHarmData");
+		return;
+	}
+
+	total   = FPGA_HarmGetPointCount();
+	curPage = FPGA_HarmTableGetCurrentPage();
+	start   = (curPage - 1) * FPGA_TABLE_ROWS_PER_PAGE;
+	end     = start + FPGA_TABLE_ROWS_PER_PAGE;
+	if (end > total) end = total;
+
+	TJC_Table_FormatCell(col1, "Harm", 5);
+	TJC_Table_FormatCell(col2, "Freq", 8);
+	TJC_Table_FormatCell(col3, "Amp",  8);
+	len = snprintf(table, sizeof(table), "%s%s%s\r\n", col1, col2, col3);
+
+	for (i = start; i < end; i++)
+	{
+		uint32_t freq;
+		uint16_t amp;
+		uint8_t harm = i + 1;
+		FPGA_HarmGetPoint(i, &freq, &amp);
+		TJC_Table_FormatNum(col1, (int32_t)harm, 5);
+		TJC_Table_FormatNum(col2, (int32_t)freq, 8);
+		TJC_Table_FormatNum(col3, (int32_t)amp,  8);
+		len += snprintf(table + len, sizeof(table) - len,
+		                "%s%s%s\r\n", col1, col2, col3);
+	}
+
+	TJC_SetText("t0", table);
+
+	snprintf(info, sizeof(info), "Pg %d/%d",
+	         (int)curPage, (int)FPGA_HarmTableGetTotalPages());
+	TJC_SetText("t1", info);
+}
 
 /* =====================================================
  * UI_UpdateParam() - 参数页刷新函数
@@ -494,6 +561,7 @@ int main(void)
 	FPGA_InitRX();                     /* 初始化USART2，接收FPGA扫频数据 */
 #if FPGA_TEST_MODE
 	FPGA_GenerateTestData();           /* generate test sweep data for table */
+	FPGA_GenerateHarmTestData();        /* generate test harmonic data for wave table */
 #endif
 
 	/* 显示启动信息 */

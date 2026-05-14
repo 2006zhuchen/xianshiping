@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(git checkout *)",
+      "Bash(cat)",
+      "Read(//d/app/tools/keil/projiect/**)",
+      "Bash(gcc -Wall -std=c99 -o test_harmonic.exe test_harmonic.c)",
+      "Bash(./test_harmonic.exe)"
+    ]
+  }
+}
