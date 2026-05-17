@@ -209,4 +209,18 @@ void TJC_Table_FormatNum(char *dst, int32_t num, uint8_t width);
  *    // cell 现在是 "256     "
  */
 
+void TJC_Table_FormatFreq5(char *dst, uint32_t freq, uint8_t width);
+/*
+ *  格式化频率（5 位零填充）：右侧补空格对齐到 width
+ *  示例：freq=100   → "00100   " (width=8)
+ *        freq=37272 → "37272   " (width=8)
+ */
+
+void TJC_Table_FormatVolt(char *dst, uint16_t amp100, uint8_t width);
+/*
+ *  格式化电压（×100 整数 → 2 位小数）：右侧补空格对齐到 width
+ *  示例：amp100=100 (1.00V) → "1.00  " (width=6)
+ *        amp100=3   (0.03V) → "0.03  " (width=6)
+ */
+
 #endif   /* __SERIAL_H  结束 */

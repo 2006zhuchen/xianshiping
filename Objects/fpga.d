@@ -29,3 +29,4 @@
 .\objects\fpga.o: .\Library\stm32f10x_usart.h
 .\objects\fpga.o: .\Library\stm32f10x_wwdg.h
 .\objects\fpga.o: .\Library\misc.h
+.\objects\fpga.o: D:\app\tools\keil\ARM\ARMCC\Bin\..\include\string.h

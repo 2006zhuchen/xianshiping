@@ -12,19 +12,14 @@
  *   STM32 PB7  ←→  FPGA 波形选择位2
  *   STM32 GND  ←→  FPGA GND
  *
- * 硬件连接（USART2 输入 ← FPGA 扫频数据）：
+ * 硬件连接（USART2 输入 ← FPGA 数据）：
  *   STM32 PA3  ←  FPGA TX
  *   STM32 GND  ←→ FPGA GND
  *
- * 电平含义：
- *   PB5=1  正弦波（SINE）
- *   PB6=1  三角波（TRI）
- *   PB7=1  方波  （SQUARE）
- *   同一时刻只有一根线为高电平
- *
- * 数据协议（ASCII，FPGA → STM32）：
- *   频率,幅值\r\n
- *   例：100,2500\r\n
+ * 数据协议（USART2 @ 115200）：
+ *   扫频文本: TXT:TYPE:电路类型;F频率V电压;...;ID=nn;\r\n
+ *   谐波文本: TXT:HARMONICS:名称:频率Hz,电压V;...;ID=nn;\r\n
+ *   波形二进制: 0xAA 0x55 trace_id [400×uint8] 0xFF
  */
 
 /* ========== 波形控制（GPIO） ========== */
@@ -39,38 +34,61 @@ typedef enum
 void FPGA_Init(void);
 void FPGA_SetWave(FPGA_WaveType wave);
 
-/* ========== 扫频数据接收（USART2） ========== */
+/* ========== 数据接收（USART2）—— 公共 ========== */
 
 #define FPGA_TABLE_ROWS_PER_PAGE  4
-#define FPGA_MAX_POINTS           2000
-#define FPGA_HARM_MAX_POINTS      200
+#define FPGA_SWEEP_MAX            16
+#define FPGA_HARM_MAX             16
+#define FPGA_WAVEFORM_PIXELS      400
+#define FPGA_WAVEFORM_DISPLAY     64
 
-void     FPGA_InitRX(void);
-void     FPGA_OnRxByte(uint8_t byte);
+void FPGA_InitRX(void);
+void FPGA_OnRxByte(uint8_t byte);
 
-uint16_t FPGA_GetPointCount(void);
-uint8_t  FPGA_GetPoint(uint16_t index, uint32_t *freq, uint16_t *amp);
+/* ========== 扫频数据（pageparam 表格用） ========== */
 
-void     FPGA_TableNextPage(void);
-void     FPGA_TablePrevPage(void);
-uint16_t FPGA_TableGetCurrentPage(void);
-uint16_t FPGA_TableGetTotalPages(void);
-uint8_t  FPGA_TableHasData(void);
+uint16_t    FPGA_GetSweepCount(void);
+uint8_t     FPGA_GetSweepPoint(uint16_t index, uint32_t *freq, uint16_t *amp);
+uint8_t     FPGA_SweepHasData(void);
+const char *FPGA_GetCircuitType(void);
+uint8_t     FPGA_GetSweepTraceId(void);
 
-/* ========== 测试用：生成模拟扫频数据 ========== */
-void     FPGA_GenerateTestData(void);
+void        FPGA_SweepTableNextPage(void);
+void        FPGA_SweepTablePrevPage(void);
+uint16_t    FPGA_SweepTableGetCurrentPage(void);
+uint16_t    FPGA_SweepTableGetTotalPages(void);
+
+/* 脏标记（UI 用，避免重复发送表格） */
+uint8_t FPGA_SweepTableIsDirty(void);
+void    FPGA_SweepTableClearDirty(void);
+void    FPGA_SweepTableSetDirty(void);
 
 /* ========== 谐波数据（pagewave 表格用） ========== */
 
-void     FPGA_GenerateHarmTestData(void);
-
 uint16_t FPGA_HarmGetPointCount(void);
 uint8_t  FPGA_HarmGetPoint(uint16_t index, uint32_t *freq, uint16_t *amp);
+uint8_t  FPGA_HarmTableHasData(void);
+uint8_t  FPGA_GetHarmTraceId(void);
 
 void     FPGA_HarmTableNextPage(void);
 void     FPGA_HarmTablePrevPage(void);
 uint16_t FPGA_HarmTableGetCurrentPage(void);
 uint16_t FPGA_HarmTableGetTotalPages(void);
-uint8_t  FPGA_HarmTableHasData(void);
+
+uint8_t FPGA_HarmTableIsDirty(void);
+void    FPGA_HarmTableClearDirty(void);
+void    FPGA_HarmTableSetDirty(void);
+
+/* ========== 波形像素（pagewave s0 用） ========== */
+
+uint8_t FPGA_WavePixelsReady(void);
+void    FPGA_ClearWavePixelsReady(void);
+uint8_t FPGA_GetWavePixel(uint16_t index);   /* 降采样 400→64 */
+uint8_t FPGA_GetWaveTraceId(void);
+
+/* ========== 测试数据生成 ========== */
+
+void FPGA_GenerateTestData(void);
+void FPGA_GenerateHarmTestData(void);
 
 #endif

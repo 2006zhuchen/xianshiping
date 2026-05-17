@@ -666,3 +666,75 @@ void TJC_Table_FormatNum(char *dst, int32_t num, uint8_t width)
 
 	dst[j] = '\0';       /* 字符串结束符 */
 }
+
+/*
+ * TJC_Table_FormatFreq5() — 频率 5 位零填充
+ *   例: freq=100   dst 为 "00100" + 右侧空格补到 width
+ *       freq=37272 dst 为 "37272" + 右侧空格补到 width
+ */
+void TJC_Table_FormatFreq5(char *dst, uint32_t freq, uint8_t width)
+{
+	char buf[8];
+	uint8_t i, j;
+
+	/* 数字转字符到 buf 末尾 */
+	buf[5] = '\0';
+	for (i = 5; i > 0; i--)
+	{
+		buf[i - 1] = (char)((freq % 10u) + '0');
+		freq /= 10u;
+	}
+
+	/* 复制到 dst */
+	j = 0;
+	while (j < 5 && j < width)
+	{
+		dst[j] = buf[j];
+		j++;
+	}
+	/* 剩余填空格 */
+	while (j < width)
+	{
+		dst[j] = ' ';
+		j++;
+	}
+	dst[j] = '\0';
+}
+
+/*
+ * TJC_Table_FormatVolt() — 电压 ×100 整数 → 2 位小数
+ *   例: amp100=100 (1.00V) dst 为 "1.00" + 右侧空格补到 width
+ *       amp100=3   (0.03V) dst 为 "0.03" + 右侧空格补到 width
+ *       amp100=40  (0.40V) dst 为 "0.40" + 右侧空格补到 width
+ */
+void TJC_Table_FormatVolt(char *dst, uint16_t amp100, uint8_t width)
+{
+	uint8_t intPart, frac, len, j;
+	char buf[8];
+
+	intPart = (uint8_t)(amp100 / 100u);
+	frac    = (uint8_t)(amp100 % 100u);
+
+	/* 拼 "整数.小数" */
+	len = 0;
+	if (intPart >= 100)      { buf[len++] = (char)((intPart / 100) + '0'); }
+	if (intPart >= 10 || len) { buf[len++] = (char)(((intPart / 10) % 10) + '0'); }
+	buf[len++] = (char)((intPart % 10) + '0');
+	buf[len++] = '.';
+	buf[len++] = (char)((frac / 10) + '0');
+	buf[len++] = (char)((frac % 10) + '0');
+
+	/* 复制到 dst */
+	j = 0;
+	while (j < len && j < width)
+	{
+		dst[j] = buf[j];
+		j++;
+	}
+	while (j < width)
+	{
+		dst[j] = ' ';
+		j++;
+	}
+	dst[j] = '\0';
+}

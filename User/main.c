@@ -34,9 +34,9 @@
 #define USE_BOARD_KEY_PAGE_SWITCH 0
 
 /* =1 时生成模拟扫频数据，测试表格显示；=0 时等待真实 FPGA 数据 */
-#define FPGA_TEST_MODE 1
+#define FPGA_TEST_MODE 0
 
-/* 陶晶驰屏上放“上一页/下一页”按钮的实际页面号（从串口回传 p=3 看出来） */
+/* 陶晶驰屏上放"上一页/下一页"按钮的实际页面号（从串口回传 p=3 看出来） */
 #define TJC_TABLE_TOUCH_PAGE 3
 
 /* pagewave 谐波表翻页按钮的组件 ID */
@@ -46,11 +46,11 @@
 /*
  * ====================== 正弦波显示参数（给 s0 用） ======================
  * 组件ID说明：
- * 1) 组件“名字”是 s0（你在页面上看到的名称）
- * 2) add 指令使用的是“组件ID(数字)”，不是名字
+ * 1) 组件"名字"是 s0（你在页面上看到的名称）
+ * 2) add 指令使用的是"组件ID(数字)"，不是名字
  * 3) 如果波形不出图，优先检查 TJC_WAVE_COMP_ID 是否与你页面里的 s0 组件ID一致
  */
-#define TJC_WAVE_COMP_ID 4
+#define TJC_WAVE_COMP_ID 3
 #define TJC_WAVE_CHANNEL 0
 #define TJC_SINE_LUT_SIZE 64
 
@@ -119,7 +119,7 @@ static volatile uint8_t g_TouchReady = 0;
  *   0x66, pageId, 0xFF, 0xFF, 0xFF
  *
  * 上位机要做的配置（非常关键）：
- *   在每个页面的“页面初始化事件”里写：sendme
+ *   在每个页面的"页面初始化事件"里写：sendme
  *   这样每次切页，屏幕都会回传当前页号，MCU 就能同步 g_Page。
  */
 #define RX_BUF_SIZE 16
@@ -160,6 +160,11 @@ void UI_OnRxByte(uint8_t byte)
 			{
 				g_WaveNeedClear = 1;
 				g_SineIndex = 0;
+				FPGA_HarmTableSetDirty();
+			}
+			else if (newPage == PAGE_PARAM)
+			{
+				FPGA_SweepTableSetDirty();
 			}
 			g_PageSyncReady = 1;
 		}
@@ -184,8 +189,8 @@ void UI_OnRxByte(uint8_t byte)
 					case 8: FPGA_SetWave(FPGA_WAVE_SINE);   break;
 					case 6: FPGA_SetWave(FPGA_WAVE_TRI);    break;
 					case 7: FPGA_SetWave(FPGA_WAVE_SQUARE); break;
-					case 9:  FPGA_TableNextPage(); break;
-					case 10: FPGA_TablePrevPage(); break;
+					case 9:  FPGA_SweepTableNextPage(); break;
+					case 10: FPGA_SweepTablePrevPage(); break;
 					default: break;
 				}
 
@@ -214,7 +219,7 @@ void UI_OnRxByte(uint8_t byte)
  * 作用：
  *   1. 发送 TJC_SetPage(page) 指令给屏幕
  *   2. g_Page 不在这里直接改，而是等待 sendme 回传后再更新
- *      （避免“屏幕实际页”和“MCU软件页”短暂不一致）
+ *      （避免"屏幕实际页"和"MCU软件页"短暂不一致）
  * 何时调用：
  *   - 用户按下"下一页"按钮时
  *   - 程序需要主动切页时
@@ -284,6 +289,12 @@ static void UI_UpdateHome(const UI_Data_t *d)
 
 static void UI_UpdateWaveTable(void);
 
+/* 波形分批灌屏状态 */
+#define WAVE_BATCH_SIZE  8
+static uint8_t g_WaveSendIndex = 0;
+static uint8_t g_WaveSendActive = 0;
+static uint8_t g_WaveNeedClrBatch = 0;
+
 /*
  * 你需要改的地方：
  *   - "1"改成你的波形组件ID
@@ -294,35 +305,69 @@ static void UI_UpdateWaveTable(void);
 static void UI_UpdateWave(const UI_Data_t *d)
 {
 	char cmd[32];
-	uint8_t y;
-
-	/*
-	 * 参数 d 在本函数里暂时不使用：
-	 * 当前波形页显示的是“代码生成的正弦波”，不是传感器波形。
-	 */
 	(void)d;
 
-	/* 切入波形页先清一次指定通道，避免残影 */
-	if (g_WaveNeedClear)
+	/* ---- 分支 1：FPGA 波形就绪，启动分批灌屏 ---- */
+	if (FPGA_WavePixelsReady())
 	{
-		snprintf(cmd, sizeof(cmd), "cle %d,%d", TJC_WAVE_COMP_ID, TJC_WAVE_CHANNEL);
+		FPGA_ClearWavePixelsReady();
+		g_WaveSendIndex  = 0;
+		g_WaveSendActive = 1;
+		g_WaveNeedClrBatch = 1;
+	}
+
+	/* ---- 分支 2：分批发送（每次 WAVE_BATCH_SIZE 个点）---- */
+	if (g_WaveSendActive)
+	{
+		uint8_t i;
+
+		if (g_WaveNeedClrBatch)
+		{
+			snprintf(cmd, sizeof(cmd), "cle %d,%d",
+			         TJC_WAVE_COMP_ID, TJC_WAVE_CHANNEL);
+			TJC_SendCommand(cmd);
+			g_WaveNeedClrBatch = 0;
+		}
+
+		for (i = 0; i < WAVE_BATCH_SIZE && g_WaveSendIndex < FPGA_WAVEFORM_DISPLAY; i++)
+		{
+			uint8_t y = FPGA_GetWavePixel(g_WaveSendIndex);
+			snprintf(cmd, sizeof(cmd), "add %d,%d,%d",
+			         TJC_WAVE_COMP_ID, TJC_WAVE_CHANNEL, y);
+			TJC_SendCommand(cmd);
+			g_WaveSendIndex++;
+		}
+
+		if (g_WaveSendIndex >= FPGA_WAVEFORM_DISPLAY)
+			g_WaveSendActive = 0;
+
+		UI_UpdateWaveTable();
+		return;
+	}
+
+	/* ---- 分支 3：无 FPGA 波形，退化到正弦 LUT ---- */
+	if (!FPGA_HarmTableHasData())
+	{
+		uint8_t y;
+
+		if (g_WaveNeedClear)
+		{
+			snprintf(cmd, sizeof(cmd), "cle %d,%d",
+			         TJC_WAVE_COMP_ID, TJC_WAVE_CHANNEL);
+			TJC_SendCommand(cmd);
+			g_WaveNeedClear = 0;
+		}
+
+		y = g_SineLut[g_SineIndex];
+		g_SineIndex++;
+		if (g_SineIndex >= TJC_SINE_LUT_SIZE)
+			g_SineIndex = 0;
+
+		snprintf(cmd, sizeof(cmd), "add %d,%d,%d",
+		         TJC_WAVE_COMP_ID, TJC_WAVE_CHANNEL, y);
 		TJC_SendCommand(cmd);
-		g_WaveNeedClear = 0;
 	}
 
-	/* 从查表取当前采样点并推进索引 */
-	y = g_SineLut[g_SineIndex];
-	g_SineIndex++;
-	if (g_SineIndex >= TJC_SINE_LUT_SIZE)
-	{
-		g_SineIndex = 0;
-	}
-
-	/* 给 s0 对应组件ID的通道持续喂点，形成滚动正弦波 */
-	snprintf(cmd, sizeof(cmd), "add %d,%d,%d", TJC_WAVE_COMP_ID, TJC_WAVE_CHANNEL, y);
-	TJC_SendCommand(cmd);
-
-	/* 刷新谐波表格到 t0 */
 	UI_UpdateWaveTable();
 }
 
@@ -337,44 +382,55 @@ static void UI_UpdateTable(void)
 {
 	char table[256];
 	char col1[16], col2[16];
-	char info[16];
+	char info[32];
 	uint16_t i, start, end, total, curPage;
 	int len;
 
-	if (!FPGA_TableHasData())
+	if (!FPGA_SweepTableIsDirty())
+		return;
+
+	if (!FPGA_SweepHasData())
 	{
 		TJC_SetText("t0", "NoData");
 		TJC_SetText("t1", "");
+		TJC_SetText("t2", "");
+		FPGA_SweepTableClearDirty();
 		return;
 	}
 
-	total   = FPGA_GetPointCount();
-	curPage = FPGA_TableGetCurrentPage();
+	total   = FPGA_GetSweepCount();
+	curPage = FPGA_SweepTableGetCurrentPage();
 	start   = (curPage - 1) * FPGA_TABLE_ROWS_PER_PAGE;
 	end     = start + FPGA_TABLE_ROWS_PER_PAGE;
 	if (end > total) end = total;
 
-	/* header：收紧宽度，避免单行过长导致屏幕自动换行 */
-	TJC_Table_FormatCell(col1, "Freq", 8);
-	TJC_Table_FormatCell(col2, "Amp", 8);
+	/* 电路类型发到 t2 */
+	TJC_SetText("t2", (char *)FPGA_GetCircuitType());
+
+	TJC_Table_FormatCell(col1, " Freq ", 7);
+	TJC_Table_FormatCell(col2, " Vout ", 6);
 	len = snprintf(table, sizeof(table), "%s%s\r\n", col1, col2);
 
-	/* data rows (max 4, short command) */
 	for (i = start; i < end; i++)
 	{
 		uint32_t freq;
 		uint16_t amp;
-		FPGA_GetPoint(i, &freq, &amp);
-		TJC_Table_FormatNum(col1, (int32_t)freq, 8);
-		TJC_Table_FormatNum(col2, (int32_t)amp,  8);
+		FPGA_GetSweepPoint(i, &freq, &amp);
+		TJC_Table_FormatFreq5(col1, freq, 7);
+		TJC_Table_FormatVolt (col2, amp,  6);
 		len += snprintf(table + len, sizeof(table) - len,
 		                "%s%s\r\n", col1, col2);
 	}
 
 	TJC_SetText("t0", table);
 
-	snprintf(info, sizeof(info), "Pg %d/%d", (int)curPage, (int)FPGA_TableGetTotalPages());
+	snprintf(info, sizeof(info), "Pg %d/%d #%d",
+	         (int)curPage,
+	         (int)FPGA_SweepTableGetTotalPages(),
+	         (int)FPGA_GetSweepTraceId());
 	TJC_SetText("t1", info);
+
+	FPGA_SweepTableClearDirty();
 }
 
 
@@ -391,13 +447,18 @@ static void UI_UpdateWaveTable(void)
 {
 	char table[256];
 	char col1[12], col2[12], col3[12];
-	char info[16];
+	char info[32];
 	uint16_t i, start, end, total, curPage;
 	int len;
+
+	if (!FPGA_HarmTableIsDirty())
+		return;
 
 	if (!FPGA_HarmTableHasData())
 	{
 		TJC_SetText("t0", "NoHarmData");
+		TJC_SetText("t1", "");
+		FPGA_HarmTableClearDirty();
 		return;
 	}
 
@@ -408,8 +469,8 @@ static void UI_UpdateWaveTable(void)
 	if (end > total) end = total;
 
 	TJC_Table_FormatCell(col1, "Harm", 5);
-	TJC_Table_FormatCell(col2, "Freq", 8);
-	TJC_Table_FormatCell(col3, "Amp",  8);
+	TJC_Table_FormatCell(col2, " Freq ", 7);
+	TJC_Table_FormatCell(col3, " Vout ",  6);
 	len = snprintf(table, sizeof(table), "%s%s%s\r\n", col1, col2, col3);
 
 	for (i = start; i < end; i++)
@@ -419,17 +480,21 @@ static void UI_UpdateWaveTable(void)
 		uint8_t harm = i + 1;
 		FPGA_HarmGetPoint(i, &freq, &amp);
 		TJC_Table_FormatNum(col1, (int32_t)harm, 5);
-		TJC_Table_FormatNum(col2, (int32_t)freq, 8);
-		TJC_Table_FormatNum(col3, (int32_t)amp,  8);
+		TJC_Table_FormatFreq5(col2, freq, 7);
+		TJC_Table_FormatVolt (col3, amp,  6);
 		len += snprintf(table + len, sizeof(table) - len,
 		                "%s%s%s\r\n", col1, col2, col3);
 	}
 
 	TJC_SetText("t0", table);
 
-	snprintf(info, sizeof(info), "Pg %d/%d",
-	         (int)curPage, (int)FPGA_HarmTableGetTotalPages());
+	snprintf(info, sizeof(info), "Pg %d/%d #%d",
+	         (int)curPage,
+	         (int)FPGA_HarmTableGetTotalPages(),
+	         (int)FPGA_GetHarmTraceId());
 	TJC_SetText("t1", info);
+
+	FPGA_HarmTableClearDirty();
 }
 
 /* =====================================================
@@ -619,11 +684,11 @@ int main(void)
 		{
 			/* FPGA 数据调试：第3行显数据条数，第4行显当前页 */
 			char dbg[16];
-			snprintf(dbg, sizeof(dbg), "D:%-5d", (int)FPGA_GetPointCount());
+			snprintf(dbg, sizeof(dbg), "D:%-5d", (int)FPGA_GetSweepCount());
 			OLED_ShowString(3, 1, dbg);
 			snprintf(dbg, sizeof(dbg), "Pg:%-3d/%-3d",
-			         (int)FPGA_TableGetCurrentPage(),
-			         (int)FPGA_TableGetTotalPages());
+			         (int)FPGA_SweepTableGetCurrentPage(),
+			         (int)FPGA_SweepTableGetTotalPages());
 			OLED_ShowString(4, 1, dbg);
 
 			/* 如果有触摸回传，显示最后一次触摸的 page/comp/event（用于诊断） */

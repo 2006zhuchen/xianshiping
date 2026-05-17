@@ -6,7 +6,9 @@
       "Bash(cat)",
       "Read(//d/app/tools/keil/projiect/**)",
       "Bash(gcc -Wall -std=c99 -o test_harmonic.exe test_harmonic.c)",
-      "Bash(./test_harmonic.exe)"
+      "Bash(./test_harmonic.exe)",
+      "Bash(D:/app/tools/python/python.exe -c ' *)",
+      "Bash(dir /s /b /o-d *.txt *.hex *.dat *.log)"
     ]
   }
 }
